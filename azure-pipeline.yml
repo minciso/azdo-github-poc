@@ -4,12 +4,6 @@ trigger:
 pool:
   vmImage: windows-latest
 
-variables:
-  # Store these as pipeline variables (not secret — they're just IDs)
-  githubAppId: '4240256'          # e.g., 123456
-  githubInstallationId: '146032064'  # e.g., 78901234
-  githubRepo: 'minciso/azdo-github-poc'   # org/repo format
-
 stages:
   - stage: AzdoToGitHubSync
     jobs:
@@ -101,4 +95,4 @@ stages:
                 git commit -m "MyRepo Pipeline Test"
                 git fetch devrepo main
                 git rebase devrepo/main -Xtheirs
-                git push --force devrepo $(Build.SourceBranchName):main
+                git push --force devrepo $(Build.SourceBranchName):$(Build.SourceBranchName)
