@@ -101,4 +101,4 @@ stages:
                 git commit -m "MyRepo Pipeline Test"
                 git fetch devrepo main
                 git rebase devrepo/main -Xtheirs
-                git push --force devrepo $(Build.SourceBranchName):main
+                git push --force devrepo $(Build.SourceBranchName):$(Build.SourceBranchName)
