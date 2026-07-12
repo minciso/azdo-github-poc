@@ -82,7 +82,10 @@ stages:
 
                 $token = $response.token
                 Write-Host "##vso[task.setvariable variable=ghToken;issecret=true]$token"
-                Write-Host "Installation token generated, expires: $($response.expires_at)"
+                $utcTime = [DateTime]::Parse($response.expires_at)
+                $phZone = [TimeZoneInfo]::FindSystemTimeZoneById('Singapore Standard Time')
+                $phTime = [TimeZoneInfo]::ConvertTimeFromUtc($utcTime, $phZone)
+                Write-Host "Installation token generated, expires: $($phTime.ToString('MM/dd/yyyy HH:mm:ss')) PHT (UTC: $($response.expires_at))"
 
           # ── Step 3: Sync repo to GitHub (same git logic as before) ──
           # Only change: $(ghToken) replaces $(mygithubrepo) PAT
