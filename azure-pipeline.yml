@@ -4,11 +4,12 @@ trigger:
 pool:
   vmImage: windows-latest
 
-variables:
-  # Store these as pipeline variables (not secret — they're just IDs)
-  githubAppId: '4240256'          # e.g., 123456
-  githubInstallationId: '146032064'  # e.g., 78901234
-  githubRepo: 'minciso/azdo-github-poc'   # org/repo format
+resources:
+  repositories:
+    - repository: github_repo
+      type: github
+      name: minciso/azdo-github-poc
+      endpoint: Azdo-GitHub-reposync          # ← the OAuth service connection name
 
 stages:
   - stage: AzdoToGitHubSync
@@ -16,89 +17,38 @@ stages:
       - job: GitSync
         steps:
 
-          # ── Step 1: Pull the GitHub App private key from Key Vault ──
-          # This replaces your old PAT secret. The .pem is stored once,
-          # no manual rotation needed.
-          - task: AzureKeyVault@2
-            inputs:
-              azureSubscription: 'KeyVaultConnection-WIF'
-              KeyVaultName: 'keyvault-wif'
-              SecretsFilter: 'github-app-private-key'
-              RunAsPreJob: false
+          # Step 1: Checkout ADO source repo
+          - checkout: self
+            path: s/ado-source
 
-          # ── Step 2: Generate installation token from the private key ──
-          # Signs a short-lived JWT → exchanges it for a 1-hour token.
-          # This is the step that replaces your PAT entirely.
-          - task: PowerShell@2
-            name: GitHubAppToken
-            displayName: 'Generate GitHub App Installation Token'
-            inputs:
-              pwsh: true
-              targetType: 'inline'
-              script: |
-                # --- Build JWT Header and Payload ---
-                $header = @{ alg = "RS256"; typ = "JWT" } | ConvertTo-Json -Compress
-                $now = [int](Get-Date -UFormat %s)
-                $payload = @{
-                    iat = $now - 60          # issued 60s ago (clock skew buffer)
-                    exp = $now + 540         # expires in 9 minutes (max 10)
-                    iss = "$(githubAppId)"
-                } | ConvertTo-Json -Compress
+          # Step 2: Checkout GitHub repo with OAuth credentials persisted
+          - checkout: github_repo
+            persistCredentials: true
+            path: s/github-target
 
-                # --- Base64Url encode ---
-                function ConvertTo-Base64Url($bytes) {
-                    [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-                }
-
-                $headerB64  = ConvertTo-Base64Url([System.Text.Encoding]::UTF8.GetBytes($header))
-                $payloadB64 = ConvertTo-Base64Url([System.Text.Encoding]::UTF8.GetBytes($payload))
-                $unsigned   = "$headerB64.$payloadB64"
-
-                # --- Sign with the private key from Key Vault ---
-                $pemRaw = "$(github-app-private-key)"
-                # Key Vault may store the PEM with escaped newlines — fix them
-                $pem = $pemRaw -replace '\\n', "`n"
-
-                $rsa = [System.Security.Cryptography.RSA]::Create()
-                $rsa.ImportFromPem($pem)
-
-                $sigBytes = $rsa.SignData(
-                    [System.Text.Encoding]::UTF8.GetBytes($unsigned),
-                    [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-                    [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
-                )
-                $signature = ConvertTo-Base64Url $sigBytes
-                $jwt = "$unsigned.$signature"
-
-                # --- Exchange JWT for installation token ---
-                $response = Invoke-RestMethod `
-                    -Uri "https://api.github.com/app/installations/$(githubInstallationId)/access_tokens" `
-                    -Method Post `
-                    -Headers @{
-                        Authorization  = "Bearer $jwt"
-                        Accept         = "application/vnd.github+json"
-                        "User-Agent"   = "AzDO-Sync-Pipeline"
-                    }
-
-                $token = $response.token
-                Write-Host "##vso[task.setvariable variable=ghToken;issecret=true]$token"
-                $utcTime = [DateTime]::Parse($response.expires_at)
-                $phZone = [TimeZoneInfo]::FindSystemTimeZoneById('Singapore Standard Time')
-                $phTime = [TimeZoneInfo]::ConvertTimeFromUtc($utcTime, $phZone)
-                Write-Host "Installation token generated, expires: $($phTime.ToString('MM/dd/yyyy HH:mm:ss')) PHT (UTC: $($response.expires_at))"
-
-          # ── Step 3: Sync repo to GitHub (same git logic as before) ──
-          # Only change: $(ghToken) replaces $(mygithubrepo) PAT
+          # Step 3: Sync ADO content to GitHub and push
           - task: CmdLine@2
-            displayName: 'Push to GitHub'
+            displayName: 'Sync and Push to GitHub'
             inputs:
               script: |
-                git config --global user.email "$(user_email)"
-                git config --global user.name "$(user_name)"
-                git remote add devrepo https://x-access-token:$(ghToken)@github.com/$(githubRepo).git
+                cd $(Pipeline.Workspace)\s\github-target
+
+                git config user.email "minciso15@gmail.com"
+                git config user.name "minciso"
+
                 git checkout -b $(Build.SourceBranchName)
+
+                REM --- Copy files from ADO repo into GitHub repo ---
+                xcopy /E /Y /I "$(Pipeline.Workspace)\s\ado-source\*" "."
+
                 git add --all
-                git commit -m "MyRepo Pipeline Test"
-                git fetch devrepo main
-                git rebase devrepo/main -Xtheirs
-                git push --force devrepo $(Build.SourceBranchName):main
+
+                REM --- Idempotency check: only commit and push if changes exist ---
+                git diff --staged --quiet
+                IF %ERRORLEVEL% NEQ 0 (
+                  echo Changes detected, committing and pushing...
+                  git commit -m "Sync from Azure DevOps - $(Build.BuildNumber)"
+                  git push --force origin $(Build.SourceBranchName):$(Build.SourceBranchName)
+                ) ELSE (
+                  echo No changes detected, repos are already in sync.
+                )
